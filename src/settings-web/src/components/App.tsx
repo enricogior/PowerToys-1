@@ -25,6 +25,7 @@ export class App extends React.Component <any, any> {
   }
 
   public componentDidMount() {
+    (window as any).init_message_handler();
     this.send_message_to_application(JSON.stringify({'refresh':true}));
   }
 
@@ -80,7 +81,6 @@ export class App extends React.Component <any, any> {
   }
 
   private save_clicked = (): void => {
-    // output_from_webview should be declared in index.html
     this.setState({saving : true});
     (window as any).output_from_webview(JSON.stringify(this.settings_screen_ref.get_data()));
   };

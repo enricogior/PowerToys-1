@@ -7,6 +7,9 @@
 #include "resource.h"
 #include <common/dpi_aware.h>
 #include <common/common.h>
+#include <wrl.h>
+#include <wil/com.h>
+#include <WebView2.h>
 
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "shcore.lib")
@@ -23,6 +26,8 @@
 // Source: https://github.com/windows-toolkit/WindowsCommunityToolkit/issues/2226#issuecomment-396360314
 #endif
 
+#define USE_WEBVIEW_2
+
 using namespace winrt;
 using namespace winrt::Windows::Foundation;
 using namespace winrt::Windows::Storage::Streams;
@@ -31,16 +36,21 @@ using namespace winrt::Windows::Web::Http::Headers;
 using namespace winrt::Windows::Web::UI;
 using namespace winrt::Windows::Web::UI::Interop;
 using namespace winrt::Windows::System;
+using namespace Microsoft::WRL;
 
 HINSTANCE g_hinst = nullptr;
 HWND g_main_wnd = nullptr;
 WebViewControl g_webview = nullptr;
 WebViewControlProcess g_webview_process = nullptr;
 
+static wil::com_ptr<IWebView2WebView> g_webview2;
+
 StreamUriResolverFromFile local_uri_resolver;
 
+#ifndef USE_WEBVIEW_2
 // Windows message for receiving copied data to send to the webview.
 UINT wm_data_for_webview = 0;
+#endif
 
 // Windows message to destroy the window. Used if:
 // - Parent process has terminated.
@@ -60,14 +70,26 @@ void NavigateToLocalhostReactServer() {
 }
 #endif
 
-#define URI_CONTENT_ID L"\\settings-html"
+#ifdef USE_WEBVIEW_2
+#define SETTINGS_WEB_PAGE L"\\settings-html\\index.html"
 
-void NavigateToUri(_In_ LPCWSTR uri_as_string) {
+void NavigateToSettingsWebPage() {
+  WCHAR path[MAX_PATH];
+  WINRT_VERIFY(GetModuleFileName(NULL, path, MAX_PATH));
+  WINRT_VERIFY(PathRemoveFileSpec(path));
+  wcscat_s(path, SETTINGS_WEB_PAGE);
+  HRESULT hres = g_webview2->Navigate(path);
+}
+#else
+#define URI_FOLDER_ID L"\\settings-html"
+#define URI_WEB_PAGE_ID L"index.html"
+
+void NavigateToSettingsWebPage() {
   // initialize the base_path for the html content relative to the executable.
   WINRT_VERIFY(GetModuleFileName(nullptr, local_uri_resolver.base_path, MAX_PATH));
   WINRT_VERIFY(PathRemoveFileSpec(local_uri_resolver.base_path));
-  wcscat_s(local_uri_resolver.base_path, URI_CONTENT_ID);
-  Uri url = g_webview.BuildLocalStreamUri(hstring(URI_CONTENT_ID), hstring(uri_as_string));
+  wcscat_s(local_uri_resolver.base_path, URI_FOLDER_ID);
+  Uri url = g_webview.BuildLocalStreamUri(hstring(URI_FOLDER_ID), hstring(URI_WEB_PAGE_ID));
   g_webview.NavigateToLocalStreamUri(url, local_uri_resolver);
 }
 
@@ -85,17 +107,32 @@ Rect client_rect_to_bounds_rect(_In_ HWND hwnd) {
 
   return bounds;
 }
+#endif
 
-void resize_web_view() {
-  Rect bounds = client_rect_to_bounds_rect(g_main_wnd);
-  IWebViewControlSite webViewControlSite = (IWebViewControlSite) g_webview;
-  webViewControlSite.Bounds(bounds);
-
+#ifdef USE_WEBVIEW_2
+void resize_webview() {
+  if (g_webview2 != nullptr) {
+    RECT bounds;
+    GetClientRect(g_main_wnd, &bounds);
+    g_webview2->put_Bounds(bounds);
+  }
 }
+#else
+void resize_webview() {
+  if (g_webview != nullptr) {
+    Rect bounds = client_rect_to_bounds_rect(g_main_wnd);
+    IWebViewControlSite webViewControlSite = (IWebViewControlSite)g_webview;
+    webViewControlSite.Bounds(bounds);
+  }
+}
+#endif
 
 #define SEND_TO_WEBVIEW_MSG 1
 
 void send_message_to_webview(const std::wstring& msg) {
+#ifdef USE_WEBVIEW_2
+  g_webview2->PostWebMessageAsJson(msg.c_str());
+#else
   if (g_main_wnd != nullptr && wm_data_for_webview != 0) {
     // Allocate the COPYDATASTRUCT and message to pass to the Webview.
     // This is needed in order to use PostMessage, since COM calls to
@@ -113,6 +150,7 @@ void send_message_to_webview(const std::wstring& msg) {
     message->lpData = (PVOID)buffer;
     WINRT_VERIFY(PostMessage(g_main_wnd, wm_data_for_webview, (WPARAM)g_main_wnd, (LPARAM)message));
   }
+#endif
 }
 
 void send_message_to_powertoys_runner(const std::wstring& msg) {
@@ -121,8 +159,8 @@ void send_message_to_powertoys_runner(const std::wstring& msg) {
   } else {
     // For Debug purposes, in case the webview is being run alone.
 #ifdef _DEBUG
-    MessageBox(g_main_wnd, msg.c_str(), L"From Webview", MB_OK);
-    //throw in some sample data
+    // MessageBox(g_main_wnd, msg.c_str(), L"From Webview", MB_OK);
+    // Debug data
     std::wstring debug_settings_info(LR"json({
             "general": {
               "startup": true,
@@ -203,6 +241,7 @@ void receive_message_from_webview(const std::wstring& msg) {
   }
 }
 
+#ifndef USE_WEBVIEW_2
 void initialize_webview() {
   try {
     g_webview_process = WebViewControlProcess();
@@ -227,24 +266,27 @@ void initialize_webview() {
         g_webview.DOMContentLoaded([=](IWebViewControl sender_loaded, WebViewControlDOMContentLoadedEventArgs const& args_loaded) {
           // runs when the content has been loaded.
           });
+        
         g_webview.ScriptNotify([=](IWebViewControl sender_script_notify, WebViewControlScriptNotifyEventArgs const& args_script_notify) {
           // content called window.external.notify()
           std::wstring message_sent = args_script_notify.Value().c_str();
           receive_message_from_webview(message_sent);
           });
+        
         g_webview.AcceleratorKeyPressed([&](IWebViewControl sender, WebViewControlAcceleratorKeyPressedEventArgs const& args) {
           if (args.VirtualKey() == winrt::Windows::System::VirtualKey::F4) {
             // WebView swallows key-events. Detect Alt-F4 one and close the window manually.
             const auto _ = g_webview.InvokeScriptAsync(hstring(L"exit_settings_app"), {});
           }
           });
-        resize_web_view();
+
+        resize_webview();
 #if defined(_DEBUG) && _DEBUG_WITH_LOCALHOST
         // Navigates to localhost:8080
         NavigateToLocalhostReactServer();
 #else
         // Navigates to settings-html/index.html.
-        NavigateToUri(L"index.html");
+        NavigateToSettingsWebPage();
 #endif
       } else if (status == AsyncStatus::Error) {
         MessageBox(NULL, L"Failed to create the WebView control.\nPlease report the bug to https://github.com/microsoft/PowerToys/issues", L"PowerToys Settings Error", MB_OK);
@@ -261,6 +303,51 @@ void initialize_webview() {
     MessageBox(g_main_wnd, message, L"Error", MB_OK);
   }
 }
+#else
+void initialize_webview2(HWND hwnd) {
+  CreateWebView2Environment(Callback<IWebView2CreateWebView2EnvironmentCompletedHandler>(
+      [hwnd](HRESULT result, IWebView2Environment* env) -> HRESULT {
+        // Create a WebView, whose parent is the main window hwnd
+        env->CreateWebView(hwnd, Callback<IWebView2CreateWebViewCompletedHandler>(
+          [hwnd](HRESULT result, IWebView2WebView* webview) -> HRESULT {
+            if (webview != nullptr) {
+              g_webview2 = webview;
+            }
+
+            // Default settings are:
+            // IWebView2Settings* Settings;
+            // g_webview2->get_Settings(&Settings);
+            // Settings->put_IsScriptEnabled(TRUE);
+            // Settings->put_AreDefaultScriptDialogsEnabled(TRUE);
+            // Settings->put_IsWebMessageEnabled(TRUE);
+
+            // Resize WebView to fit the bounds of the parent window
+            resize_webview();
+
+            // Schedule an async task to navigate to the settings general page
+            NavigateToSettingsWebPage();
+
+            // Step 4 - Navigation events
+
+            // Step 5 - Scripting
+
+            // Step 6 - Communication between host and web content
+            EventRegistrationToken token;
+            g_webview2->add_WebMessageReceived(Callback<IWebView2WebMessageReceivedEventHandler>(
+              [](IWebView2WebView* webview, IWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
+                PWSTR message;
+                args->get_WebMessageAsString(&message);
+                receive_message_from_webview(message);
+                CoTaskMemFree(message);
+                return S_OK;
+              }).Get(), &token);
+
+            return S_OK;
+          }).Get());
+        return S_OK;
+      }).Get());
+}
+#endif
 
 LRESULT CALLBACK wnd_proc_static(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
   switch (message) {
@@ -283,12 +370,12 @@ LRESULT CALLBACK wnd_proc_static(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
     PostQuitMessage(0);
     break;
   case WM_SIZE:
-    if (g_webview != nullptr) {
-      resize_web_view();
-    }
+      resize_webview();
     break;
   case WM_CREATE:
+#ifndef USE_WEBVIEW_2
     wm_data_for_webview = RegisterWindowMessageW(L"PTSettingsCopyDataWebView");
+#endif
     wm_destroy_window = RegisterWindowMessageW(L"PTSettingsParentTerminated");
     break;
   case WM_DPICHANGED:
@@ -305,13 +392,15 @@ LRESULT CALLBACK wnd_proc_static(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
   }
   break;
   case WM_NCCREATE:
-  {
     // Enable auto-resizing the title bar
     EnableNonClientDpiScaling(hWnd);
-  }
-  break;
+    break;
   default:
-    if (message == wm_data_for_webview) {
+    if (message == wm_destroy_window) {
+      DestroyWindow(hWnd);
+    }
+#ifndef USE_WEBVIEW_2
+    else if (message == wm_data_for_webview) {
       PCOPYDATASTRUCT msg = (PCOPYDATASTRUCT)lParam;
       if (msg->dwData == SEND_TO_WEBVIEW_MSG) {
         wchar_t* json_message = (wchar_t*)(msg->lpData);
@@ -322,11 +411,9 @@ LRESULT CALLBACK wnd_proc_static(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
       }
       // wnd_proc_static is responsible for freeing memory.
       delete msg;
-    } else {
-      if (message == wm_destroy_window) {
-        DestroyWindow(hWnd);
-      }
     }
+#endif
+
     break;
   }
   return DefWindowProc(hWnd, message, wParam, lParam);;
@@ -419,7 +506,12 @@ void initialize_message_pipe() {
 }
 
 int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPSTR lpCmdLine, _In_ int nShowCmd) {
-  CoInitialize(nullptr);
+
+#ifdef USE_WEBVIEW_2
+  winrt::init_apartment(apartment_type::multi_threaded);
+#else
+  winrt::init_apartment(apartment_type::single_threaded);
+#endif
 
   if (is_process_elevated()) {
     if (!drop_elevated_privileges()) {
@@ -436,7 +528,13 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
     MessageBox(NULL, L"Failed to create main window.\nPlease report the bug to https://github.com/microsoft/PowerToys/issues", L"PowerToys Settings Error", MB_OK);
     exit(1);
   }
+
+#ifdef USE_WEBVIEW_2
+  initialize_webview2(g_main_wnd);
+#else
   initialize_webview();
+#endif
+
   ShowWindow(g_main_wnd, nShowCmd);
 
   // Main message loop.
