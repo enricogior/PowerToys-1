@@ -194,7 +194,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
             drop_elevated_privileges();
         }
 
-        run_non_elevated(L"modules\\launcher\\PowerLauncher.exe", L"");
+        HANDLE hMapFile = OpenFileMappingW(PAGE_READWRITE, FALSE, POWER_LAUNCHER_PID_SHARED_FILE);
+        PDWORD pidBuffer = reinterpret_cast<PDWORD>(MapViewOfFile(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(DWORD)));
+        run_non_elevated(L"modules\\launcher\\PowerLauncher.exe", L"", pidBuffer);
     }
     else if (action == L"-install_dotnet")
     {
