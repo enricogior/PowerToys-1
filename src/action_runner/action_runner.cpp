@@ -199,7 +199,12 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         if (pidBuffer)
         {
             run_non_elevated(L"modules\\launcher\\PowerLauncher.exe", L"", pidBuffer);
+            FlushViewOfFile(pidBuffer, sizeof(DWORD));
+            UnmapViewOfFile(pidBuffer);
         }
+
+        FlushFileBuffers(hMapFile);
+        CloseHandle(hMapFile);
     }
     else if (action == L"-install_dotnet")
     {
