@@ -198,6 +198,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         PDWORD pidBuffer = reinterpret_cast<PDWORD>(MapViewOfFile(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(DWORD)));
         if (pidBuffer)
         {
+            *pidBuffer = 0;
             run_non_elevated(L"modules\\launcher\\PowerLauncher.exe", L"", pidBuffer);
             FlushViewOfFile(pidBuffer, sizeof(DWORD));
             UnmapViewOfFile(pidBuffer);

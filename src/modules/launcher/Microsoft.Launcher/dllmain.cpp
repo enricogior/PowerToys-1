@@ -154,10 +154,23 @@ public:
  
           // Set up the shared file from which to retrieve the PID of PowerLauncher
           HANDLE hMapFile = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, sizeof(DWORD), POWER_LAUNCHER_PID_SHARED_FILE);
-          ShellExecuteExW(&sei);
-          Sleep(250);
           PDWORD pidBuffer = reinterpret_cast<PDWORD>(MapViewOfFile(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(DWORD)));
-          m_hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, *pidBuffer);
+          *pidBuffer = 0;
+          m_hProcess = NULL;
+          ShellExecuteExW(&sei);
+          
+          const int maxRetries = 20;
+          for (int retry = 0; retry < maxRetries; ++retry)
+          {
+              Sleep(50);
+              DWORD pid = *pidBuffer;
+              if (pid)
+              {
+                  m_hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+                  break;
+              }
+          }
+
           CloseHandle(hMapFile);
       }
 
